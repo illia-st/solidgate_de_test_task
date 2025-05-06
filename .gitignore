@@ -1,0 +1,4 @@
+venv/
+logs/
+dags/__pycache__/
+.env
