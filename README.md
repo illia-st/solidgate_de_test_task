@@ -107,11 +107,36 @@ A dedicated Python class was implemented to interact with the OpenExchangeRates 
 2. Start services using Docker Compose:
 
 ```bash
+docker compose build
 docker compose up
 ```
 Make sure the DAGs are enabled in the Airflow UI
 
+If you face with such an error:
+```bash
+ Last check result:
+ $ airflow db check
+ Traceback (most recent call last):
+   File "/home/airflow/.local/bin/airflow", line 5, in <module>
+     from airflow.__main__ import main
+   File "/home/airflow/.local/lib/python3.7/site-packages/airflow/__init__.py", line 52, in <module>
+     from airflow import configuration
+   File "/home/airflow/.local/lib/python3.7/site-packages/airflow/configuration.py", line 1814, in <module>
+     conf = initialize_config()
+   File "/home/airflow/.local/lib/python3.7/site-packages/airflow/configuration.py", line 1516, in initialize_config
+     with open(AIRFLOW_CONFIG, "w") as file:
+ PermissionError: [Errno 13] Permission denied: '/opt/airflow/airflow.cfg'
 
+exited with code 1
+```
+Make sure you have granted corresponding permissions to your `airflow` folder
+
+
+In Linux you can do it in the following way:
+```bash
+sudo chmod -R 777 ./airflow
+```
+Then you can try again
 ## Author
 
 **Illia Stetsenko**  
