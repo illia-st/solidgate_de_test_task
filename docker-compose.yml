@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres1:
     image: postgres:15-alpine
@@ -34,113 +32,19 @@ services:
       test: ["CMD-SHELL", "pg_isready -U $DB_USER"]
       interval: 5s
       retries: 5
+    ports:
+      - 5441:5432
     networks:
       - airflow-net
-
-  airflow-db:
-    image: postgres:15-alpine
-    container_name: airflow-db
-    environment:
-      - POSTGRES_USER=airflow
-      - POSTGRES_PASSWORD=airflow
-      - POSTGRES_DB=airflow
+  airflow:
+    build:
+      context: .
+      dockerfile: DockerFile_AirFlow
     volumes:
-      - pg_airflow_db:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER"]
-      interval: 5s
-      retries: 5
-    networks:
-      - airflow-net
-
-  airflow-init:
-    image: apache/airflow:2.6.2
-    container_name: airflow-init
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
-      _PIP_ADDITIONAL_REQUIREMENTS: 'psycopg2-binary requests' # I guess I will move to the .env file
-      OXR_APP_ID: ${OXR_APP_ID}
-      DB1_HOST: postgres1
-      DB1_NAME: ${DB1_NAME}
-      DB1_USER: ${DB_USER}
-      DB1_PASS: ${DB_PASS}
-      DB2_HOST: postgres2
-      DB2_NAME: ${DB2_NAME}
-      DB2_USER: ${DB_USER}
-      DB2_PASS: ${DB_PASS}
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin
-    entrypoint: /bin/bash
-    command: -c "airflow db init && airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin"
-    depends_on:
-      airflow-db:
-        condition: service_healthy
-    networks:
-      - airflow-net
-
-  airflow-webserver:
-    image: apache/airflow:2.6.2
-    container_name: airflow-webserver
+      - ./airflow:/opt/airflow
     ports:
       - "8080:8080"
-    depends_on:
-      airflow-db:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
-      _PIP_ADDITIONAL_REQUIREMENTS: 'psycopg2-binary requests'
-      OXR_APP_ID: ${OXR_APP_ID}
-      DB1_HOST: postgres1
-      DB1_NAME: ${DB1_NAME}
-      DB1_USER: ${DB_USER}
-      DB1_PASS: ${DB_PASS}
-      DB2_HOST: postgres2
-      DB2_NAME: ${DB2_NAME}
-      DB2_USER: ${DB_USER}
-      DB2_PASS: ${DB2_PASS}
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./scripts:/opt/airflow/scripts
-      - ./logs:/opt/airflow/logs
-    command: airflow webserver
-    networks:
-      - airflow-net
-
-  airflow-scheduler:
-    image: apache/airflow:2.6.2
-    container_name: airflow-scheduler
-    depends_on:
-      airflow-db:
-        condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
-      AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
-      _PIP_ADDITIONAL_REQUIREMENTS: 'psycopg2-binary requests'
-      OXR_APP_ID: ${OXR_APP_ID}
-      DB1_HOST: postgres1
-      DB1_NAME: ${DB1_NAME}
-      DB1_USER: ${DB_USER}
-      DB1_PASS: ${DB_PASS}
-      DB2_HOST: postgres2
-      DB2_NAME: ${DB2_NAME}
-      DB2_USER: ${DB_USER}
-      DB2_PASS: ${DB_PASS}
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./scripts:/opt/airflow/scripts
-      - ./logs:/opt/airflow/logs
-    command: airflow scheduler
+    command: airflow standalone
     networks:
       - airflow-net
 
@@ -151,4 +55,3 @@ networks:
 volumes:
   pgdata1:
   pgdata2:
-  pg_airflow_db:

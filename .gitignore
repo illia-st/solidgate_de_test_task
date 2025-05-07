@@ -1,4 +1,26 @@
-venv/
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Airflow-generated files
+airflow-webserver.pid
+airflow.db
+*.log
 logs/
-dags/__pycache__/
+scheduler/
+dag_processor_manager/
+dag_id=*
+
+# Environment files
 .env
+*.env
+
+# Python virtual environments
+venv/
+
+# Airflow config
+airflow.cfg
+standalone_admin_password.txt
+
+# VS Code workspace state (optional)
+.vscode/
