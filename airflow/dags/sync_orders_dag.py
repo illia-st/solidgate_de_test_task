@@ -44,7 +44,7 @@ INCREMENT_PROCESSING_ATTEMPT = (
 
 APP_KEY_OPEN_EXCHANGE_API = os.environ.get("OXR_APP_ID")
 
-MAX_PROCESSING_ATTEMPS = os.environ.get("MAX_PROCESSING_ATTEMPS")
+MAX_PROCESSING_ATTEMPS = int(os.environ.get("MAX_PROCESSING_ATTEMPS", 5))
 
 def get_unprocessed_orders(cursor: PgCursor) -> List[Order]:
     cursor.execute(GET_UNPROCESSED_ORDERS_QUERY)
@@ -74,16 +74,15 @@ def convert_to_eur(amount: Decimal, currency: str, rates: dict) -> Decimal:
     return amount / Decimal(rate)
 
 def sync_orders_to_eur():
+    """Converts the order prices to **EUR** using the latest exchange rates from the OpenExchangeRates API and Inserts the data into the `orders_eur` table in **postgres-2** database"""
     try:
         logger.info("Starting sync process...")
-        # 1. API виклик
         try:
             eur_rates = OpenExchangeRatesAPI(app_id=APP_KEY_OPEN_EXCHANGE_API).get_latest_rates(base="EUR").get("rates")
         except Exception as e:
             logger.error("Failed to fetch exchange rates: %s", e)
             raise
 
-        # 2. Підключення до баз
         try:
             src_conn, dest_conn = create_connections()
             src_cur = src_conn.cursor()
@@ -93,13 +92,12 @@ def sync_orders_to_eur():
             raise
 
         try:
-            # 3. Читання необроблених
             unprocessed_orders = get_unprocessed_orders(src_cur)
             if not unprocessed_orders:
                 logger.info("No unprocessed orders found.")
                 return
 
-            # 4. Конвертація та додавання
+
             new_orders: List[Order] = []
             for order_id, customer_email, order_date, amount, currency, processing_attempts in unprocessed_orders:
                 try:
@@ -107,10 +105,10 @@ def sync_orders_to_eur():
                 except ValueError as conv_err:
                     logger.warning("Skipping order %s due to conversion error: %s", order_id, conv_err)
 
-                    src_cur.execute(INCREMENT_PROCESSING_ATTEMPT, order_id)
-                    # Mark as failed if limit reached
+                    src_cur.execute(INCREMENT_PROCESSING_ATTEMPT, (order_id,))
+
                     if processing_attempts + 1 >= MAX_PROCESSING_ATTEMPS:
-                        src_cur.execute(MARK_ORDER_AS_FAILED, order_id)
+                        src_cur.execute(MARK_ORDER_AS_FAILED, (order_id,))
                     continue
 
                 new_orders.append(Order(order_id, customer_email, order_date, eur_amount, currency, 0))
@@ -138,14 +136,14 @@ def sync_orders_to_eur():
         logger.exception("Sync DAG failed with error: %s", e)
 
     finally:
-        try:
+        if src_cur:
             src_cur.close()
+        if dst_cur:
             dst_cur.close()
+        if src_conn:
             src_conn.close()
+        if dest_conn:
             dest_conn.close()
-        except Exception:
-            pass  # Ігноруємо, якщо щось уже закрите
-
 
 with DAG(
     dag_id='convert_orders_to_eur',
