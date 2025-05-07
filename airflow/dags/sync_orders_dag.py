@@ -1,7 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-
-import pendulum
+from airflow.utils.dates import days_ago
 
 import os
 import psycopg2
@@ -23,15 +22,29 @@ class Order:
     order_date: datetime
     amount: Decimal
     currency: str
+    processing_attempts: int
 
-GET_UNPROCESSED_ORDERS_QUERY = "SELECT ORDER_ID, CUSTOMER_EMAIL, ORDER_DATE, AMOUNT, CURRENCY FROM ORDERS WHERE NOT PROCESSED"
+GET_UNPROCESSED_ORDERS_QUERY = (
+    "SELECT order_id, customer_email, order_date, amount, currency, processing_attempts "
+    "FROM orders WHERE not processed AND not failed"
+)
+
 INSERT_PROCESSED_ORDERS_QUERY = (
     "INSERT INTO orders_eur (order_id, customer_email, order_date, amount_eur, original_currency) "
     "VALUES (%s, %s, %s, %s, %s)"
 )
-MARK_ORDERS_AS_PROCESSED = "UPDATE orders SET processed = TRUE WHERE NOT processed"
 
-APP_KEY_OPEN_EXCHANGE_API = "5183c2a0f5c64b41a3363bf184ef6db9"
+MARK_ORDERS_AS_PROCESSED = "UPDATE orders SET processed = TRUE WHERE order_id IN %s"
+
+MARK_ORDER_AS_FAILED = "UPDATE orders SET failed = TRUE WHERE order_id = %s"
+
+INCREMENT_PROCESSING_ATTEMPT = (
+    "UPDATE orders SET processing_attempts = processing_attempts + 1 WHERE order_id = %s"
+)
+
+APP_KEY_OPEN_EXCHANGE_API = os.environ.get("OXR_APP_ID")
+
+MAX_PROCESSING_ATTEMPS = int(os.environ.get("MAX_PROCESSING_ATTEMPS", 5))
 
 def get_unprocessed_orders(cursor: PgCursor) -> List[Order]:
     cursor.execute(GET_UNPROCESSED_ORDERS_QUERY)
@@ -39,16 +52,16 @@ def get_unprocessed_orders(cursor: PgCursor) -> List[Order]:
 
 def create_connections():
     src_conn = psycopg2.connect(
-        host=os.environ.get('DB1_HOST', 'postgres1'),
-        # dbname=os.environ.get('DB1_NAME', 'orders_db'),
-        user=os.environ.get('DB1_USER', 'postgres'),
-        password=os.environ.get('DB1_PASS', 'postgres')
+        host=os.environ.get('ORDERS_DB_HOST', ''),
+        dbname=os.environ.get('ORDERS_DB_NAME', ''),
+        user=os.environ.get('ORDERS_DB_USER', ''),
+        password=os.environ.get('ORDERS_DB_PASS', '')
     )
     dest_conn = psycopg2.connect(
-        host=os.environ.get('DB2_HOST', 'postgres2'),
-        # dbname=os.environ.get('DB2_NAME', 'orders_eur_db'),
-        user=os.environ.get('DB2_USER', 'postgres'),
-        password=os.environ.get('DB2_PASS', 'postgres')
+        host=os.environ.get('ORDERS_DB_EUR_HOST', ''),
+        dbname=os.environ.get('ORDERS_DB_EUR_NAME', ''),
+        user=os.environ.get('ORDERS_DB_EUR_USER', ''),
+        password=os.environ.get('ORDERS_DB_EUR_PASS', '')
     )
     return src_conn, dest_conn
 
@@ -61,59 +74,81 @@ def convert_to_eur(amount: Decimal, currency: str, rates: dict) -> Decimal:
     return amount / Decimal(rate)
 
 def sync_orders_to_eur():
-    """Extract new orders from source, convert amounts to EUR, and load into target database."""
-    eur_rates = OpenExchangeRatesAPI(app_id=APP_KEY_OPEN_EXCHANGE_API).get_latest_rates(base="EUR").get("rates")
+    """Converts the order prices to **EUR** using the latest exchange rates from the OpenExchangeRates API and Inserts the data into the `orders_eur` table in **postgres-2** database"""
+    try:
+        logger.info("Starting sync process...")
+        try:
+            eur_rates = OpenExchangeRatesAPI(app_id=APP_KEY_OPEN_EXCHANGE_API).get_latest_rates(base="EUR").get("rates")
+        except Exception as e:
+            logger.error("Failed to fetch exchange rates: %s", e)
+            raise
 
-    src_conn, dest_conn = create_connections()
+        try:
+            src_conn, dest_conn = create_connections()
+            src_cur = src_conn.cursor()
+            dst_cur = dest_conn.cursor()
+        except Exception as e:
+            logger.error("Failed to connect to databases: %s", e)
+            raise
 
-    src_cur = src_conn.cursor()
-    dst_cur = dest_conn.cursor()
+        try:
+            unprocessed_orders = get_unprocessed_orders(src_cur)
+            if not unprocessed_orders:
+                logger.info("No unprocessed orders found.")
+                return
 
-    unprocessed_orders = get_unprocessed_orders(src_cur)
-    if len(unprocessed_orders) == 0:
-        src_cur.close()
-        dst_cur.close()
-        src_conn.close()
-        dest_conn.close()
-        return
 
-    new_orders: List[Order] = []
-    for order_id, customer_email, order_date, amount, currency in unprocessed_orders:
-        eur_amount = convert_to_eur(amount, currency, rates=eur_rates)
-        new_orders.append(Order(order_id, customer_email, order_date, eur_amount, currency))
+            new_orders: List[Order] = []
+            for order_id, customer_email, order_date, amount, currency, processing_attempts in unprocessed_orders:
+                try:
+                    eur_amount = convert_to_eur(amount, currency, rates=eur_rates)
+                except ValueError as conv_err:
+                    logger.warning("Skipping order %s due to conversion error: %s", order_id, conv_err)
 
-    dst_cur.executemany(INSERT_PROCESSED_ORDERS_QUERY, [
-        (order.order_id, order.customer_email, order.order_date, order.amount, order.currency)
-        for order in new_orders
-    ])
+                    src_cur.execute(INCREMENT_PROCESSING_ATTEMPT, (order_id,))
 
-    src_cur.execute(MARK_ORDERS_AS_PROCESSED)
-    dest_conn.commit()
-    src_conn.commit()
+                    if processing_attempts + 1 >= MAX_PROCESSING_ATTEMPS:
+                        src_cur.execute(MARK_ORDER_AS_FAILED, (order_id,))
+                    continue
 
-    logger.info("Transferred %d orders into source database into destination.", len(new_orders))
+                new_orders.append(Order(order_id, customer_email, order_date, eur_amount, currency, 0))
 
-    if len(new_orders) > 0:
-        print("Synced %d new orders to EUR database.", len(new_orders))
-    else:
-        print("No new orders to sync.")
+            if new_orders:
+                dst_cur.executemany(INSERT_PROCESSED_ORDERS_QUERY, [
+                    (order.order_id, order.customer_email, order.order_date, order.amount, order.currency)
+                    for order in new_orders
+                ])
+                order_ids = tuple(order.order_id for order in new_orders)
+                src_cur.execute(MARK_ORDERS_AS_PROCESSED, (order_ids,))
+                dest_conn.commit()
+                src_conn.commit()
+                logger.info("Synced %d orders to EUR DB", len(new_orders))
+            else:
+                logger.info("No orders to insert after conversion.")
 
-    src_cur.close()
-    dst_cur.close()
-    src_conn.close()
-    dest_conn.close()
+        except Exception as e:
+            logger.error("Sync process failed during data processing: %s", e)
+            src_conn.rollback()
+            dest_conn.rollback()
+            raise
 
-default_args = {
-    'owner': 'airflow',
-    'depends_on_past': False,
-    'retries': 0,
-}
+    except Exception as e:
+        logger.exception("Sync DAG failed with error: %s", e)
+
+    finally:
+        if src_cur:
+            src_cur.close()
+        if dst_cur:
+            dst_cur.close()
+        if src_conn:
+            src_conn.close()
+        if dest_conn:
+            dest_conn.close()
 
 with DAG(
     dag_id='convert_orders_to_eur',
-    default_args=default_args,
-    schedule='*/2 * * * *',
-    start_date=pendulum.datetime(2025, 5, 1, tz="UTC"),
+    schedule='@hourly',
+    start_date=days_ago(1),
     catchup=False
 ) as dag:
     sync_orders_to_eur_task = PythonOperator(
